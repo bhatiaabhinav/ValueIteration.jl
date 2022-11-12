@@ -4,8 +4,7 @@ using MDPs
 
 export bellman_backup_synchronous, policy_evaluation, value_iteration, PolicyEvaluationHook
 
-function bellman_backup_synchronous(mdp::AbstractMDP{Int, Int}, q::Matrix{Float64}, v::Vector{Float64})
-    γ = discount_factor(mdp)
+function bellman_backup_synchronous(mdp::AbstractMDP{Int, Int}, q::Matrix{Float64}, v::Vector{Float64}, γ::Real)
     @inline R(s,a,s′) = reward(mdp, s, a, s′)
     @inline T(s,a,s′) = transition_probability(mdp, s, a, s′)
     nactions, nstates = size(q)
@@ -20,7 +19,7 @@ function bellman_backup_synchronous(mdp::AbstractMDP{Int, Int}, q::Matrix{Float6
     return δ
 end
 
-function policy_evaluation(mdp::AbstractMDP{Int, Int}, π::AbstractPolicy{Int, Int}; ϵ=0.01, infinite_horizon=false)::Tuple{Float64, Vector{Float64}, Matrix{Float64}}
+function policy_evaluation(mdp::AbstractMDP{Int, Int}, π::AbstractPolicy{Int, Int}, γ::Real, horizon::Real; ϵ=0.01)::Tuple{Float64, Vector{Float64}, Matrix{Float64}}
     nstates = length(state_space(mdp))
     nactions = length(action_space(mdp))
     𝕊 = state_space(mdp)
@@ -29,9 +28,11 @@ function policy_evaluation(mdp::AbstractMDP{Int, Int}, π::AbstractPolicy{Int, I
     q = zeros(nactions, nstates)
     v = zeros(nstates)
 
-    for i in 1:(infinite_horizon ? typemax(Int) : horizon(mdp))
-        δ = bellman_backup_synchronous(mdp, q, v)
+    i = 0
+    while i < horizon
+        δ = bellman_backup_synchronous(mdp, q, v, γ)
         v .= map(s -> sum(a -> π(s, a) * q[a, s], 𝔸), 𝕊)
+        i += 1
         if δ < ϵ
             # println("iter $i: breaking because δ=$δ < ϵ=$ϵ")
             break
@@ -44,7 +45,7 @@ function policy_evaluation(mdp::AbstractMDP{Int, Int}, π::AbstractPolicy{Int, I
 end
 
 
-function value_iteration(mdp::AbstractMDP{Int, Int}; ϵ=0.01, infinite_horizon=false)::Tuple{Float64, Vector{Float64}, Matrix{Float64}}
+function value_iteration(mdp::AbstractMDP{Int, Int}, γ::Real, horizon::Real; ϵ=0.01)::Tuple{Float64, Vector{Float64}, Matrix{Float64}}
     nstates = length(state_space(mdp))
     nactions = length(action_space(mdp))
     𝕊 = state_space(mdp)
@@ -52,10 +53,12 @@ function value_iteration(mdp::AbstractMDP{Int, Int}; ϵ=0.01, infinite_horizon=f
     q = zeros(nactions, nstates)
     v = zeros(nstates)
 
-    for i in 1:(infinite_horizon ? typemax(Int) : horizon(mdp))
-        δ = bellman_backup_synchronous(mdp, q, v)
+    # println("starting")
+    i = 0
+    while i < horizon
+        δ = bellman_backup_synchronous(mdp, q, v, γ)
         v .= transpose(maximum(q, dims=1))
-        # println(δ)
+        i += 1
         if δ < ϵ
             # println("iter $i: breaking because δ=$δ < ϵ=$ϵ")
             break
@@ -69,18 +72,21 @@ end
 
 
 struct PolicyEvaluationHook <: AbstractHook
+    π::AbstractPolicy
+    γ::Real
+    horizon::Real
     n::Int
     returns::Vector{Float64}
-    PolicyEvaluationHook(n) = new(n, Float64[])
+    PolicyEvaluationHook(π::AbstractPolicy, γ::Real, horizon::Real, n::Int) = new(π, γ, horizon, n, Float64[])
 end
 
-function MDPs.preexperiment(peh::PolicyEvaluationHook; env, policy, kwargs...)
-    push!(peh.returns, policy_evaluation(env, policy)[1])
+function MDPs.preexperiment(peh::PolicyEvaluationHook; env, kwargs...)
+    push!(peh.returns, policy_evaluation(env, peh.π, peh.γ, peh.horizon)[1])
 end
 
-function MDPs.postepisode(peh::PolicyEvaluationHook; env, policy, returns, kwargs...)
+function MDPs.postepisode(peh::PolicyEvaluationHook; env, returns, kwargs...)
     if length(returns) % peh.n == 0
-        push!(peh.returns, policy_evaluation(env, policy)[1])
+        push!(peh.returns, policy_evaluation(env, peh.π, peh.γ, peh.horizon)[1])
     end
 end
 
