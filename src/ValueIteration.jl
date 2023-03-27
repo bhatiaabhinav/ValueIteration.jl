@@ -2,7 +2,7 @@ module ValueIteration
 
 using MDPs
 
-export bellman_backup_synchronous, policy_evaluation, value_iteration, PolicyEvaluationHook
+export policy_evaluation, value_iteration, PolicyEvaluationHook
 
 function bellman_backup_synchronous(mdp::AbstractMDP{Int, Int}, q::Matrix{Float64}, v::Vector{Float64}, γ::Real)
     @inline R(s,a,s′) = reward(mdp, s, a, s′)
@@ -13,6 +13,25 @@ function bellman_backup_synchronous(mdp::AbstractMDP{Int, Int}, q::Matrix{Float6
         for a in 1:nactions
             qᵢ₊₁ = sum(s′ -> T(s, a, s′)*(R(s, a, s′) + γ * v[s′]), transition_support(mdp, s, a))
             δ = max(δ, abs(qᵢ₊₁ - q[a, s]))
+            q[a, s] = qᵢ₊₁
+        end
+    end
+    return δ
+end
+
+function bellman_backup_synchronous!(q::Matrix{Float64}, v::Vector{Float64}, R::Array{Float64, 3}, T::Array{Float64, 3}, γ::Float64)::Float64
+    nactions::Int, nstates::Int = size(q)
+    δ::Float64 = 0
+    for s::Int in 1:nstates
+        @inbounds for a::Int in 1:nactions
+            qᵢ₊₁::Float64 = 0
+            @simd for s′ in 1:nstates
+                qᵢ₊₁ += T[s′, a, s]*(R[s′, a, s] + γ * v[s′])
+            end
+            δₐₛ::Float64 = abs(qᵢ₊₁ - q[a, s])
+            if δₐₛ > δ
+                δ = δₐₛ
+            end
             q[a, s] = qᵢ₊₁
         end
     end
@@ -45,27 +64,61 @@ function policy_evaluation(mdp::AbstractMDP{Int, Int}, π::AbstractPolicy{Int, I
 end
 
 
+# function value_iteration(mdp::AbstractMDP{Int, Int}, γ::Real, horizon::Real; ϵ=0.01)::Tuple{Float64, Vector{Float64}, Matrix{Float64}}
+#     nstates = length(state_space(mdp))
+#     nactions = length(action_space(mdp))
+#     𝕊 = state_space(mdp)
+
+#     q = zeros(nactions, nstates)
+#     v = zeros(nstates)
+
+#     # println("starting")
+#     i = 0
+#     while i < horizon
+#         δ = bellman_backup_synchronous(mdp, q, v, γ)
+#         v .= transpose(maximum(q, dims=1))
+#         i += 1
+#         if δ < ϵ
+#             # println("iter $i: breaking because δ=$δ < ϵ=$ϵ")
+#             break
+#         end
+#     end
+
+#     J = sum(start_state_distribution(mdp, 𝕊) .* v)
+
+#     return J, v, q
+# end
+
 function value_iteration(mdp::AbstractMDP{Int, Int}, γ::Real, horizon::Real; ϵ=0.01)::Tuple{Float64, Vector{Float64}, Matrix{Float64}}
-    nstates = length(state_space(mdp))
-    nactions = length(action_space(mdp))
-    𝕊 = state_space(mdp)
+    nstates::Int = length(state_space(mdp))
+    nactions::Int = length(action_space(mdp))
+    𝕊::IntegerSpace = state_space(mdp)
 
-    q = zeros(nactions, nstates)
-    v = zeros(nstates)
-
-    # println("starting")
-    i = 0
-    while i < horizon
-        δ = bellman_backup_synchronous(mdp, q, v, γ)
-        v .= transpose(maximum(q, dims=1))
-        i += 1
-        if δ < ϵ
-            # println("iter $i: breaking because δ=$δ < ϵ=$ϵ")
-            break
+    q::Matrix{Float64} = zeros(nactions, nstates)
+    v::Vector{Float64} = zeros(nstates)
+    T::Array{Float64, 3} = zeros(nstates, nactions, nstates)
+    R::Array{Float64, 3} = zeros(nstates, nactions, nstates)
+    for s::Int in 1:nstates
+        for a::Int in 1:nactions
+            for s′::Int in 1:nstates
+                @inbounds T[s′, a, s] = transition_probability(mdp, s, a, s′)
+                @inbounds R[s′, a, s] = reward(mdp, s, a, s′)
+            end
         end
     end
+    γf64 = Float64(γ)
 
-    J = sum(start_state_distribution(mdp, 𝕊) .* v)
+    i::Int = 0
+    while i < horizon
+        δ = bellman_backup_synchronous!(q, v, R, T, γf64)
+        for s::Int in 1:nstates
+            @inbounds v[s] = @views maximum(q[:, s])
+        end
+        i += 1
+        δ < ϵ && break
+    end
+
+    J::Float64 = sum(start_state_distribution(mdp, 𝕊) .* v)
 
     return J, v, q
 end
