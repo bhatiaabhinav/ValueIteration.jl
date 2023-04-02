@@ -89,15 +89,41 @@ end
 #     return J, v, q
 # end
 
-function value_iteration(mdp::AbstractMDP{Int, Int}, γ::Real, horizon::Real; ϵ=0.01)::Tuple{Float64, Vector{Float64}, Matrix{Float64}}
+"""
+    value_iteration(mdp::AbstractMDP{Int, Int}, γ::Real, horizon::Real; ϵ=0.01, prealloc_q::Union{Matrix{Float64}, Nothing}=nothing, prealloc_v::Union{Vector{Float64}, Nothing}=nothing, prealloc_T::Union{Array{Float64, 3}, Nothing}=nothing, prealloc_R::Union{Array{Float64, 3}, Nothing}=nothing)::Tuple{Float64, Vector{Float64}, Matrix{Float64}}
+
+Perform value iteration on the given MDP.
+
+# Arguments
+
+- `mdp`: The MDP to perform value iteration on.
+- `γ`: The discount factor.
+- `horizon`: The maximum number of iterations to perform.
+- `ϵ`: The convergence threshold.
+- `prealloc_q`: A preallocated matrix to use for the Q function.
+- `prealloc_v`: A preallocated vector to use for the V function.
+- `prealloc_T`: A preallocated array to use for the transition probability function.
+- `prealloc_R`: A preallocated array to use for the reward function.
+
+# Returns
+
+- `J`: The optimal value over the start state distribution.
+- `v`: The optimal value function.
+- `q`: The optimal Q function.
+"""
+function value_iteration(mdp::AbstractMDP{Int, Int}, γ::Real, horizon::Real; ϵ=0.01, prealloc_q::Union{Matrix{Float64}, Nothing}=nothing, prealloc_v::Union{Vector{Float64}, Nothing}=nothing, prealloc_T::Union{Array{Float64, 3}, Nothing}=nothing, prealloc_R::Union{Array{Float64, 3}, Nothing}=nothing)::Tuple{Float64, Vector{Float64}, Matrix{Float64}}
     nstates::Int = length(state_space(mdp))
     nactions::Int = length(action_space(mdp))
     𝕊::IntegerSpace = state_space(mdp)
 
-    q::Matrix{Float64} = zeros(nactions, nstates)
-    v::Vector{Float64} = zeros(nstates)
-    T::Array{Float64, 3} = zeros(nstates, nactions, nstates)
-    R::Array{Float64, 3} = zeros(nstates, nactions, nstates)
+    q::Matrix{Float64} = isnothing(prealloc_q) ? zeros(nactions, nstates) : prealloc_q
+    @assert size(q) == (nactions, nstates)
+    v::Vector{Float64} = isnothing(prealloc_v) ? zeros(nstates) : prealloc_v
+    @assert length(v) == nstates
+    T::Array{Float64, 3} = isnothing(prealloc_T) ? zeros(nstates, nactions, nstates) : prealloc_T
+    @assert size(T) == (nstates, nactions, nstates)
+    R::Array{Float64, 3} = isnothing(prealloc_R) ? zeros(nstates, nactions, nstates) : prealloc_R
+    @assert size(R) == (nstates, nactions, nstates)
     for s::Int in 1:nstates
         for a::Int in 1:nactions
             for s′::Int in 1:nstates
