@@ -2,7 +2,7 @@ module ValueIteration
 
 using MDPs
 
-export policy_evaluation, value_iteration, PolicyEvaluationHook
+export policy_evaluation, value_iteration, policy_iteration, PolicyEvaluationHook
 
 function bellman_backup_synchronous(mdp::AbstractMDP{S, A}, q::Matrix{Float64}, v::Vector{Float64}, γ::Real) where {S, A}
     @inline R(s,a,s′) = reward(mdp, 𝕊[s], 𝔸[a], 𝕊[s′])
@@ -39,6 +39,25 @@ function bellman_backup_synchronous!(q::Matrix{Float64}, v::Vector{Float64}, R::
     return δ
 end
 
+"""
+    policy_evaluation(mdp::AbstractMDP{S, A}, π::AbstractPolicy{_S, _A}, γ::Real, horizon::Real; ϵ=0.01)::Tuple{Float64, Vector{Float64}, Matrix{Float64}} where {S, A, _S, _A}
+
+Perform policy evalution on the given MDP. The state and action spaces must be `IntegerSpace` or `EnumerableTensorSpace`.
+
+# Arguments
+
+- `mdp`: The MDP to perform value iteration on.
+- `π`: The policy to evaluate.
+- `γ`: The discount factor.
+- `horizon`: The maximum number of iterations to perform.
+- `ϵ`: The convergence threshold.
+
+# Returns
+
+- `J`: The optimal value over the start state distribution.
+- `v`: The optimal value function.
+- `q`: The optimal Q function.
+"""
 function policy_evaluation(mdp::AbstractMDP{S, A}, π::AbstractPolicy{_S, _A}, γ::Real, horizon::Real; ϵ=0.01)::Tuple{Float64, Vector{Float64}, Matrix{Float64}} where {S, A, _S, _A}
     nstates = length(state_space(mdp))
     nactions = length(action_space(mdp))
@@ -56,7 +75,6 @@ function policy_evaluation(mdp::AbstractMDP{S, A}, π::AbstractPolicy{_S, _A}, �
         v .= map(s -> sum(a -> _π(s, a) * q[a, s], eachindex(𝔸)), eachindex(𝕊))
         i += 1
         if δ < ϵ
-            # println("iter $i: breaking because δ=$δ < ϵ=$ϵ")
             break
         end
     end
@@ -129,6 +147,65 @@ function value_iteration(mdp::AbstractMDP{S, A}, γ::Real, horizon::Real; ϵ=0.0
 end
 
 
+"""
+    policy_iteration(mdp::AbstractMDP{S, A}, γ::Real, horizon::Real; ϵ=0.01, prealloc_q::Union{Matrix{Float64}, Nothing}=nothing, prealloc_v::Union{Vector{Float64}, Nothing}=nothing, prealloc_T::Union{Array{Float64, 3}, Nothing}=nothing, prealloc_R::Union{Array{Float64, 3}, Nothing}=nothing)::Tuple{Float64, Vector{Float64}, Matrix{Float64}} where {S, A}
+
+Perform policy iteration on the given MDP. The state and action spaces must be `IntegerSpace` or `EnumerableTensorSpace`.
+
+# Arguments
+
+- `mdp`: The MDP to perform value iteration on.
+- `γ`: The discount factor.
+- `horizon`: The maximum number of iterations to perform.
+- `ϵ`: The convergence threshold.
+- `policy_improvement_step`: The policy improvement step to use. Defaults to `q -> GreedyPolicy(q)`.
+- `max_iterations`: The maximum number of iterations to perform. Defaults to `nothing`, which means that the algorithm will run until convergence.
+
+# Returns
+
+- `Js`: The optimal value over the start state distribution for each iteration.
+- `vs`: The optimal value function for each iteration.
+- `qs`: The optimal Q function for each iteration.
+- `policies`: The policy for each iteration.
+"""
+function policy_iteration(mdp::AbstractMDP{S, A}, γ::Real, horizon::Real; ϵ=0.01, policy_improvement_step = q -> GreedyPolicy(q), max_iterations=nothing) where {S, A}
+    Js::Vector{Float64} = Float64[]
+    vs::Vector{Vector{Float64}} = Vector{Float64}[]
+    qs::Vector{Matrix{Float64}} = Matrix{Float64}[]
+    policies = []
+
+    policy_changed = true
+    policy = GreedyPolicy(zeros(length(action_space(mdp)), length(state_space(mdp))))
+    states = state_space(mdp) |> collect
+    actions = policy.(states)
+    iters = 0
+    while policy_changed
+        J, v, q = policy_evaluation(mdp, policy, γ, horizon; ϵ=ϵ)
+        push!.((Js, vs, qs, policies), (J, v, q, policy))
+        policy = policy_improvement_step(q)
+        actions_after = policy.(states)
+        # policy_changed = actions != actions_after
+        actions = actions_after
+        iters += 1
+        if !isnothing(max_iterations) && iters >= max_iterations
+            break
+        end
+    end
+    
+    return Js, vs, qs, policies
+end
+
+"""
+    PolicyEvaluationHook(π::AbstractPolicy, γ::Real, horizon::Real, n::Int)
+
+A hook for use with `MDPs.interact` that evaluates the given policy every `n` episodes and stores the result in `returns`.
+
+# Arguments
+- `π`: The policy to evaluate.
+- `γ`: The discount factor.
+- `horizon`: The horizon to use for policy evaluation.
+- `n`: The number of episodes between evaluations.
+"""
 struct PolicyEvaluationHook <: AbstractHook
     π::AbstractPolicy
     γ::Real

@@ -1,7 +1,7 @@
 name = "ValueIteration"
 uuid = "485ddabf-8628-49a7-9e47-2c80b05bea31"
 authors = ["Abhinav Bhatia <abhinav.bhatia.me@gmail.com>"]
-version = "0.3.0"
+version = "0.4.0"
 
 [deps]
 MDPs = "11f886ef-95cd-43ae-b218-d50c093ca059"
