@@ -4,32 +4,36 @@ using MDPs
 
 export policy_evaluation, value_iteration, policy_iteration, PolicyEvaluationHook
 
-function bellman_backup_synchronous(mdp::AbstractMDP{S, A}, q::Matrix{Float64}, v::Vector{Float64}, γ::Real) where {S, A}
-    @inline R(s,a,s′) = reward(mdp, 𝕊[s], 𝔸[a], 𝕊[s′])
-    @inline T(s,a,s′) = transition_probability(mdp, 𝕊[s], 𝔸[a], 𝕊[s′])
-    𝕊 = state_space(mdp)
-    𝔸 = action_space(mdp)
-    δ = 0
-    for s in eachindex(𝕊)
-        for a in eachindex(𝔸)
-            qᵢ₊₁ = sum(s′ -> T(s, a, s′)*(R(s, a, s′) + γ * v[s′]), transition_support(mdp, 𝕊[s], 𝔸[a]))
-            δ = max(δ, abs(qᵢ₊₁ - q[a, s]))
-            q[a, s] = qᵢ₊₁
-        end
-    end
-    return δ
-end
 
-function bellman_backup_synchronous!(q::Matrix{Float64}, v::Vector{Float64}, R::Array{Float64, 3}, T::Array{Float64, 3}, γ::Float64)::Float64
+"""
+    bellman_backup_action_values_synchronous!(q::AbstractMatrix{T}, v::AbstractVector{T}, R::AbstractArray{T, 3}, Tr::AbstractArray{T, 3}, γ::T)::T where T<:AbstractFloat
+
+Perform a synchronous Bellman backup on the action values with formula:
+
+qᵢ₊₁(a, s) <- Σₛ′ Tr(s′, a, s) * (R(s′, a, s) + γ * v(s′))
+
+# Arguments
+
+- `q`: The action values to update, with indices [a, s].
+- `v`: The value function, with indices [s].
+- `R`: The reward function, with indices [s', a, s].
+- `Tr`: The transition probability function, with indices [s', a, s].
+- `γ`: The discount factor.
+
+# Returns
+
+- `δ`: The maximum change in the action values.
+"""
+function bellman_backup_action_values_synchronous!(q::AbstractMatrix{T}, v::AbstractVector{T}, R::AbstractArray{T, 3}, Tr::AbstractArray{T, 3}, γ::T)::T where T<:AbstractFloat
     nactions::Int, nstates::Int = size(q)
-    δ::Float64 = 0
+    δ::T = 0
     for s::Int in 1:nstates
         @inbounds for a::Int in 1:nactions
-            qᵢ₊₁::Float64 = 0
+            qᵢ₊₁::T = 0
             @simd for s′ in 1:nstates
-                qᵢ₊₁ += T[s′, a, s]*(R[s′, a, s] + γ * v[s′])
+                qᵢ₊₁ += Tr[s′, a, s]*(R[s′, a, s] + γ * v[s′])
             end
-            δₐₛ::Float64 = abs(qᵢ₊₁ - q[a, s])
+            δₐₛ::T = abs(qᵢ₊₁ - q[a, s])
             if δₐₛ > δ
                 δ = δₐₛ
             end
@@ -37,6 +41,13 @@ function bellman_backup_synchronous!(q::Matrix{Float64}, v::Vector{Float64}, R::
         end
     end
     return δ
+end
+
+function bellman_backup_action_values_vectorized(q::AbstractMatrix{T}, v::AbstractVector{T}, R::AbstractArray{T, 3}, Tr::AbstractArray{T, 3}, γ::T)::Union{AbstractMatrix{T}, T} where T<:AbstractFloat
+    tmp = @. Tr * (R + γ * v)
+    q_new = @views sum(tmp, dims=1)[1, :, :]
+    δ = maximum(abs.(q_new - q))
+    return q_new, δ
 end
 
 """
@@ -54,29 +65,44 @@ Perform policy evalution on the given MDP. The state and action spaces must be `
 
 # Returns
 
-- `J`: The optimal value over the start state distribution.
-- `v`: The optimal value function.
-- `q`: The optimal Q function.
+- `J`: The value over the start state distribution, under the given policy.
+- `v`: The value function, where `v[s]` is the value of state `s` under the given policy.
+- `q`: The Q function, where `q[a, s]` is the value of taking action `a` in state `s` under the given policy.
 """
 function policy_evaluation(mdp::AbstractMDP{S, A}, π::AbstractPolicy{_S, _A}, γ::Real, horizon::Real; ϵ=0.01)::Tuple{Float64, Vector{Float64}, Matrix{Float64}} where {S, A, _S, _A}
     nstates = length(state_space(mdp))
     nactions = length(action_space(mdp))
     𝕊 = state_space(mdp)
     𝔸 = action_space(mdp)
-
-    q = zeros(nactions, nstates)
-    v = zeros(nstates)
-
     _π(s, a) = π(_S == Int ? s : 𝕊[s], _A == Int ? a : 𝔸[a])
 
-    i = 0
-    while i < horizon
-        δ = bellman_backup_synchronous(mdp, q, v, γ)
-        v .= map(s -> sum(a -> _π(s, a) * q[a, s], eachindex(𝔸)), eachindex(𝕊))
-        i += 1
-        if δ < ϵ
-            break
+    q::Matrix{Float64} = zeros(nactions, nstates)
+    v::Vector{Float64} = zeros(nstates)
+    T::Array{Float64, 3} = zeros(nstates, nactions, nstates)
+    R::Array{Float64, 3} = zeros(nstates, nactions, nstates)
+    πas = zeros(nactions, nstates)
+    Threads.@threads for s::Int in eachindex(𝕊)
+        for a::Int in eachindex(𝔸)
+            for s′::Int in eachindex(𝕊)
+                @inbounds T[s′, a, s] = transition_probability(mdp, 𝕊[s], 𝔸[a], 𝕊[s′])
+                @inbounds R[s′, a, s] = reward(mdp, 𝕊[s], 𝔸[a], 𝕊[s′])
+            end
+            πas = _π(s, a)
         end
+    end
+    γf64 = Float64(γ)
+
+    i::int = 0
+    while i < horizon
+        δ = bellman_backup_action_values_synchronous!(q, v, R, T, γf64)
+        @inbounds for s::Int in 1:nstates
+            v[s] = 0
+            for a::Int in 1:nactions  # why is @simd not working here? says "simd loop index must be a symbol"
+                v[s] += πas[a, s] * q[a, s]
+            end
+        end
+        i += 1
+        δ < ϵ && break
     end
 
     J = sum(start_state_distribution(mdp, 𝕊) .* v)
@@ -88,7 +114,7 @@ end
 """
     value_iteration(mdp::AbstractMDP{S, A}, γ::Real, horizon::Real; ϵ=0.01, prealloc_q::Union{Matrix{Float64}, Nothing}=nothing, prealloc_v::Union{Vector{Float64}, Nothing}=nothing, prealloc_T::Union{Array{Float64, 3}, Nothing}=nothing, prealloc_R::Union{Array{Float64, 3}, Nothing}=nothing)::Tuple{Float64, Vector{Float64}, Matrix{Float64}} where {S, A}
 
-Perform value iteration on the given MDP. The state and action spaces must be `IntegerSpace` or `EnumerableTensorSpace`.
+Perform value iteration on the given MDP. The state and action spaces must be `IntegerSpace` or `EnumerableTensorSpace`. Preallocated arrays can be provided for the Q, V, T, and R functions. The indices for the Q function are [a, s], the indices for the T function are [s', a, s], and the indices for the R function are [s', a, s].
 
 # Arguments
 
@@ -96,18 +122,18 @@ Perform value iteration on the given MDP. The state and action spaces must be `I
 - `γ`: The discount factor.
 - `horizon`: The maximum number of iterations to perform.
 - `ϵ`: The convergence threshold.
-- `prealloc_q`: A preallocated matrix to use for the Q function.
-- `prealloc_v`: A preallocated vector to use for the V function.
-- `prealloc_T`: A preallocated array to use for the transition probability function.
-- `prealloc_R`: A preallocated array to use for the reward function.
+- `prealloc_v`: A preallocated vector to use for the v function.
+- `prealloc_q`: A preallocated matrix to use for the q function, with indices [a, s].
+- `prealloc_T`: A preallocated array to use for the transition probability function, with indices [s', a, s].
+- `prealloc_R`: A preallocated array to use for the reward function, with indices [s', a, s].
 
 # Returns
 
 - `J`: The optimal value over the start state distribution.
-- `v`: The optimal value function.
-- `q`: The optimal Q function.
+- `v`: The optimal value function, where `v[s]` is the optimal value of state `s`.
+- `q`: The optimal q function, where `q[a, s]` is the optimal value of taking action `a` in state `s`.
 """
-function value_iteration(mdp::AbstractMDP{S, A}, γ::Real, horizon::Real; ϵ=0.01, prealloc_q::Union{Matrix{Float64}, Nothing}=nothing, prealloc_v::Union{Vector{Float64}, Nothing}=nothing, prealloc_T::Union{Array{Float64, 3}, Nothing}=nothing, prealloc_R::Union{Array{Float64, 3}, Nothing}=nothing)::Tuple{Float64, Vector{Float64}, Matrix{Float64}} where {S, A}
+function value_iteration(mdp::AbstractMDP{S, A}, γ::Real, horizon::Real; ϵ=0.01, prealloc_v::Union{Vector{Float64}, Nothing}=nothing, prealloc_q::Union{Matrix{Float64}, Nothing}=nothing, prealloc_T::Union{Array{Float64, 3}, Nothing}=nothing, prealloc_R::Union{Array{Float64, 3}, Nothing}=nothing)::Tuple{Float64, Vector{Float64}, Matrix{Float64}} where {S, A}
     nstates::Int = length(state_space(mdp))
     nactions::Int = length(action_space(mdp))
     𝕊::Union{IntegerSpace, EnumerableTensorSpace} = state_space(mdp)
@@ -117,29 +143,20 @@ function value_iteration(mdp::AbstractMDP{S, A}, γ::Real, horizon::Real; ϵ=0.0
     @assert size(q) == (nactions, nstates)
     v::Vector{Float64} = isnothing(prealloc_v) ? zeros(nstates) : prealloc_v
     @assert length(v) == nstates
-    T::Array{Float64, 3} = isnothing(prealloc_T) ? zeros(nstates, nactions, nstates) : prealloc_T
-    @assert size(T) == (nstates, nactions, nstates)
+    Tr::Array{Float64, 3} = isnothing(prealloc_T) ? zeros(nstates, nactions, nstates) : prealloc_T
+    @assert size(Tr) == (nstates, nactions, nstates)
     R::Array{Float64, 3} = isnothing(prealloc_R) ? zeros(nstates, nactions, nstates) : prealloc_R
     @assert size(R) == (nstates, nactions, nstates)
-    for s::Int in eachindex(𝕊)
+    Threads.@threads for s::Int in eachindex(𝕊)
         for a::Int in eachindex(𝔸)
             for s′::Int in eachindex(𝕊)
-                @inbounds T[s′, a, s] = transition_probability(mdp, 𝕊[s], 𝔸[a], 𝕊[s′])
+                @inbounds Tr[s′, a, s] = transition_probability(mdp, 𝕊[s], 𝔸[a], 𝕊[s′])
                 @inbounds R[s′, a, s] = reward(mdp, 𝕊[s], 𝔸[a], 𝕊[s′])
             end
         end
     end
-    γf64 = Float64(γ)
 
-    i::Int = 0
-    while i < horizon
-        δ = bellman_backup_synchronous!(q, v, R, T, γf64)
-        for s::Int in 1:nstates
-            @inbounds v[s] = @views maximum(q[:, s])
-        end
-        i += 1
-        δ < ϵ && break
-    end
+    v, q = value_iteration(Tr, R, γ, horizon; ϵ=ϵ, prealloc_v=v, prealloc_q=q)
 
     J::Float64 = sum(start_state_distribution(mdp, 𝕊) .* v)
 
@@ -148,7 +165,53 @@ end
 
 
 """
-    policy_iteration(mdp::AbstractMDP{S, A}, γ::Real, horizon::Real; ϵ=0.01, prealloc_q::Union{Matrix{Float64}, Nothing}=nothing, prealloc_v::Union{Vector{Float64}, Nothing}=nothing, prealloc_T::Union{Array{Float64, 3}, Nothing}=nothing, prealloc_R::Union{Array{Float64, 3}, Nothing}=nothing)::Tuple{Float64, Vector{Float64}, Matrix{Float64}} where {S, A}
+    value_iteration(Tr::Array{T, 3}, R::Array{T, 3}, γ::Real, horizon::Real; ϵ=0.01, prealloc_v::Union{Vector{T}, Nothing}=nothing, prealloc_q::Union{Matrix{T}, Nothing}=nothing)::Tuple{Vector{T}, Matrix{T}} where T<:AbstractFloat
+
+Perform value iteration given the transition probability and reward functions. The transition function indices are [s', a, s] and the reward function indices are [s', a, s]. Notice that s' is the first index in the transition function and the reward function. A preallocated vector and matrix can be provided for the V and Q functions. The indices for the Q function are [a, s].
+
+# Arguments
+
+- `Tr`: The transition probability function, where `Tr[s', a, s]` is the probability of transitioning to state `s'` given that action `a` is taken in state `s`.
+- `R`: The reward function, where `R[s', a, s]` is the reward of transitioning to state `s'` given that action `a` is taken in state `s`.
+- `γ`: The discount factor.
+- `horizon`: The maximum number of iterations to perform.
+- `ϵ`: The convergence threshold.
+- `prealloc_v`: A preallocated vector to use for the v function.
+- `prealloc_q`: A preallocated matrix to use for the q function.
+
+# Returns
+
+- `v`: The optimal value function, where `v[s]` is the optimal value of state `s`.
+- `q`: The optimal Q function, where `q[a, s]` is the optimal value of taking action `a` in state `s`.
+"""
+function value_iteration(Tr::Array{T, 3}, R::Array{T, 3}, γ::Real, horizon::Real; ϵ=0.01, prealloc_v::Union{Vector{T}, Nothing}=nothing, prealloc_q::Union{Matrix{T}, Nothing}=nothing)::Tuple{Vector{T}, Matrix{T}} where T<:AbstractFloat
+    nstates::Int = size(Tr, 1)
+    nactions::Int = size(Tr, 2)
+
+    q::Matrix{Float64} = isnothing(prealloc_q) ? zeros(nactions, nstates) : prealloc_q
+    @assert size(q) == (nactions, nstates)
+    v::Vector{Float64} = isnothing(prealloc_v) ? zeros(nstates) : prealloc_v
+    @assert length(v) == nstates
+    @assert size(Tr) == (nstates, nactions, nstates)
+    @assert size(R) == (nstates, nactions, nstates)
+    γf64 = Float64(γ)
+
+    i::Int = 0
+    while i < horizon
+        δ = bellman_backup_action_values_synchronous!(q, v, R, Tr, γf64)
+        for s::Int in 1:nstates
+            @inbounds v[s] = @views maximum(q[:, s])
+        end
+        i += 1
+        δ < ϵ && break
+    end
+
+    return v, q
+end
+
+
+"""
+    policy_iteration(mdp::AbstractMDP{S, A}, γ::Real, horizon::Real; ϵ=0.01, policy_improvement_step = q -> GreedyPolicy(q), max_iterations=nothing)::Tuple{Vector{Float64}, Vector{Vector{Float64}}, Vector{Matrix{Float64}}, Vector{P}} where {S, A, P<:AbstractPolicy}
 
 Perform policy iteration on the given MDP. The state and action spaces must be `IntegerSpace` or `EnumerableTensorSpace`.
 
