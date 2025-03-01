@@ -92,7 +92,7 @@ function policy_evaluation(mdp::AbstractMDP{S, A}, π::AbstractPolicy{_S, _A}, �
     end
     γf64 = Float64(γ)
 
-    i::int = 0
+    i::Int = 0
     while i < horizon
         δ = bellman_backup_action_values_synchronous!(q, v, R, T, γf64)
         @inbounds for s::Int in 1:nstates
